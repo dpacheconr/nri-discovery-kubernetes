@@ -26,6 +26,16 @@ rules:
       - "services"
       - "namespaces"
     verbs: ["get", "list"]
+  # Leader election permissions (for DaemonSet deployments)
+  - apiGroups: ["coordination.k8s.io"]
+    resources:
+      - "leases"
+    verbs: ["get", "list", "watch", "create", "update", "patch"]
+  # Optional: events for debugging
+  - apiGroups: [""]
+    resources:
+      - "events"
+    verbs: ["create", "patch"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding

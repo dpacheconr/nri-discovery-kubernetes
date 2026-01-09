@@ -1,0 +1,127 @@
+---
+# ServiceAccount for nri-discovery-kubernetes
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: newrelic
+  namespace: default
+automountServiceAccountToken: true
+---
+# ClusterRole with all required permissions including leader election
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: newrelic
+rules:
+  # Kubelet API access
+  - apiGroups: [""]
+    resources:
+      - "nodes"
+      - "nodes/metrics"
+      - "nodes/stats"
+      - "nodes/proxy"
+      - "pods"
+      - "services"
+      - "namespaces"
+    verbs: ["get", "list"]
+  # Leader election permissions
+  - apiGroups: ["coordination.k8s.io"]
+    resources:
+      - "leases"
+    verbs: ["get", "list", "watch", "create", "update", "patch"]
+  # Optional: events for debugging
+  - apiGroups: [""]
+    resources:
+      - "events"
+    verbs: ["create", "patch"]
+---
+# ClusterRoleBinding
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: newrelic
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: newrelic
+subjects:
+  - kind: ServiceAccount
+    name: newrelic
+    namespace: default
+---
+# DaemonSet with leader election enabled
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: nri-discovery-kubernetes
+  namespace: default
+  labels:
+    app: nri-discovery-kubernetes
+spec:
+  selector:
+    matchLabels:
+      app: nri-discovery-kubernetes
+  template:
+    metadata:
+      labels:
+        app: nri-discovery-kubernetes
+    spec:
+      serviceAccountName: newrelic
+      hostNetwork: true
+      dnsPolicy: ClusterFirstWithHostNet
+      tolerations:
+        # Allow scheduling on all nodes including control plane
+        - effect: NoSchedule
+          operator: Exists
+        - effect: NoExecute
+          operator: Exists
+      containers:
+        - name: nri-discovery-kubernetes
+          image: newrelic/nri-discovery-kubernetes
+          imagePullPolicy: IfNotPresent
+          # Leader election arguments
+          args:
+            - "--enable-leader-election=true"
+            - "--leader-election-lease-duration=15s"
+            - "--leader-election-renew-deadline=10s"
+            - "--leader-election-retry-period=2s"
+            # Optional: uncomment to configure discovery execution
+            # - "--port=10250"
+            # - "--tls"
+            # - "--discover-services"
+            # - "--namespaces=default,kube-system"
+          # Environment variables required for leader election and discovery
+          env:
+            # Pod identity for leader election (required)
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  apiVersion: v1
+                  fieldPath: metadata.name
+            # Namespace for leader election lease (required)
+            - name: POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  apiVersion: v1
+                  fieldPath: metadata.namespace
+            # Cluster name for discovery metadata (required)
+            - name: CLUSTER_NAME
+              value: "my-cluster"  # CHANGE THIS to your actual cluster name
+            # Optional: node name for multi-node scenarios
+            - name: NRI_KUBERNETES_NODE_NAME
+              valueFrom:
+                fieldRef:
+                  apiVersion: v1
+                  fieldPath: spec.nodeName
+          securityContext:
+            privileged: true
+          # Optional: add resource limits if needed
+          # resources:
+          #   requests:
+          #     memory: "64Mi"
+          #     cpu: "100m"
+          #   limits:
+          #     memory: "128Mi"
+          #     cpu: "200m"
+      # Restart policy: always restart on failure
+      restartPolicy: Always

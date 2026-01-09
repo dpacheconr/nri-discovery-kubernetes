@@ -4,6 +4,7 @@ import (
 	"errors"
 	"os"
 	"strings"
+	"time"
 
 	flag "github.com/spf13/pflag"
 	"github.com/spf13/viper"
@@ -27,10 +28,26 @@ const (
 	FlagNodeName          = "node_name"
 	FlagDiscoverServices  = "discover-services"
 
+	// Leader election flags
+	FlagEnableLeaderElection       = "enable-leader-election"
+	FlagLeaderElectionNamespace    = "leader-election-namespace"
+	FlagLeaderElectionLeaseName    = "leader-election-lease-name"
+	FlagLeaderElectionLeaseDuration = "leader-election-lease-duration"
+	FlagLeaderElectionRenewDeadline = "leader-election-renew-deadline"
+	FlagLeaderElectionRetryPeriod  = "leader-election-retry-period"
+
 	envPrefix            = "NRIA"
 	nodeNameEnvVar       = "NRI_KUBERNETES_NODE_NAME"
 	nodeNameEnvVarLegacy = "NRK8S_NODE_NAME"
 	clusterNameEnvVar    = "CLUSTER_NAME"
+	podNameEnvVar        = "POD_NAME"
+	podNamespaceEnvVar   = "POD_NAMESPACE"
+
+	// Default leader election configuration
+	DefaultLeaderElectionLeaseDuration = 15 * time.Second
+	DefaultLeaderElectionRenewDeadline = 10 * time.Second
+	DefaultLeaderElectionRetryPeriod   = 2 * time.Second
+	DefaultLeaderElectionLeaseName     = "nri-discovery-kubernetes-leader"
 )
 
 var (
@@ -51,6 +68,14 @@ For backwards compatibility this flag takes precedence over 'tls')`)
 	_ = flag.String(FlagKubeConfigFile, "", "(optional) Kubeconfig to use to connecto to kubelet")
 	_ = flag.Bool(FlagDiscoverServices, false, "(optional, default false) Discover Kubernetes services instead of just pods")
 
+	// Leader election flags
+	_ = flag.Bool(FlagEnableLeaderElection, false, "(optional, default false) Enable leader election for DaemonSet deployments")
+	_ = flag.String(FlagLeaderElectionNamespace, "", "(optional, default POD_NAMESPACE env var) Namespace for leader election lease resource")
+	_ = flag.String(FlagLeaderElectionLeaseName, DefaultLeaderElectionLeaseName, "(optional, default nri-discovery-kubernetes-leader) Name of the leader election lease resource")
+	_ = flag.Duration(FlagLeaderElectionLeaseDuration, DefaultLeaderElectionLeaseDuration, "(optional, default 15s) Duration a leader holds the lease")
+	_ = flag.Duration(FlagLeaderElectionRenewDeadline, DefaultLeaderElectionRenewDeadline, "(optional, default 10s) Leader must renew lease before this deadline")
+	_ = flag.Duration(FlagLeaderElectionRetryPeriod, DefaultLeaderElectionRetryPeriod, "(optional, default 2s) Non-leader pods retry interval to acquire lease")
+
 	ErrClusterNameNotSet = errors.New("cluster name is not set")
 )
 
@@ -66,6 +91,16 @@ type Config struct {
 	ClusterName      string
 	NodeName         string
 	DiscoverServices bool
+
+	// Leader election configuration
+	EnableLeaderElection       bool
+	LeaderElectionNamespace    string
+	LeaderElectionLeaseName    string
+	LeaderElectionLeaseDuration time.Duration
+	LeaderElectionRenewDeadline time.Duration
+	LeaderElectionRetryPeriod   time.Duration
+	PodName                     string
+	PodNamespace                string
 }
 
 func splitStrings(str string) []string {
@@ -104,16 +139,29 @@ func NewConfig(version string) (*Config, error) {
 	_ = v.BindPFlag(FlagNodeName, flag.Lookup(FlagNodeName))
 	_ = v.BindPFlag(FlagDiscoverServices, flag.Lookup(FlagDiscoverServices))
 
+	// Leader election flag bindings
+	_ = v.BindPFlag(FlagEnableLeaderElection, flag.Lookup(FlagEnableLeaderElection))
+	_ = v.BindPFlag(FlagLeaderElectionNamespace, flag.Lookup(FlagLeaderElectionNamespace))
+	_ = v.BindPFlag(FlagLeaderElectionLeaseName, flag.Lookup(FlagLeaderElectionLeaseName))
+	_ = v.BindPFlag(FlagLeaderElectionLeaseDuration, flag.Lookup(FlagLeaderElectionLeaseDuration))
+	_ = v.BindPFlag(FlagLeaderElectionRenewDeadline, flag.Lookup(FlagLeaderElectionRenewDeadline))
+	_ = v.BindPFlag(FlagLeaderElectionRetryPeriod, flag.Lookup(FlagLeaderElectionRetryPeriod))
+
 	v.SetEnvPrefix(envPrefix)
 	v.AutomaticEnv()
 
 	config := Config{
-		Namespaces:       splitStrings(v.GetString(FlagNamespaces)),
-		Port:             v.GetInt(FlagPort),
-		Host:             v.GetString(FlagHost),
-		Timeout:          v.GetInt(FlagTimeout),
-		Retries:          v.GetInt(FlagRetries),
-		DiscoverServices: v.GetBool(FlagDiscoverServices),
+		Namespaces:                  splitStrings(v.GetString(FlagNamespaces)),
+		Port:                        v.GetInt(FlagPort),
+		Host:                        v.GetString(FlagHost),
+		Timeout:                     v.GetInt(FlagTimeout),
+		Retries:                     v.GetInt(FlagRetries),
+		DiscoverServices:            v.GetBool(FlagDiscoverServices),
+		EnableLeaderElection:        v.GetBool(FlagEnableLeaderElection),
+		LeaderElectionLeaseName:     v.GetString(FlagLeaderElectionLeaseName),
+		LeaderElectionLeaseDuration: v.GetDuration(FlagLeaderElectionLeaseDuration),
+		LeaderElectionRenewDeadline: v.GetDuration(FlagLeaderElectionRenewDeadline),
+		LeaderElectionRetryPeriod:   v.GetDuration(FlagLeaderElectionRetryPeriod),
 	}
 
 	// To leave the variable empty as nil
@@ -149,6 +197,21 @@ func NewConfig(version string) (*Config, error) {
 	}
 
 	config.NodeName = node
+
+	// Read pod name and namespace for leader election
+	podName, _ := os.LookupEnv(podNameEnvVar)
+	config.PodName = podName
+
+	podNamespace, _ := os.LookupEnv(podNamespaceEnvVar)
+	config.PodNamespace = podNamespace
+
+	// If leader election namespace flag is set, use it; otherwise use pod namespace
+	leaderElectionNamespace := v.GetString(FlagLeaderElectionNamespace)
+	if leaderElectionNamespace != "" {
+		config.LeaderElectionNamespace = leaderElectionNamespace
+	} else if config.PodNamespace != "" {
+		config.LeaderElectionNamespace = config.PodNamespace
+	}
 
 	return &config, nil
 }
